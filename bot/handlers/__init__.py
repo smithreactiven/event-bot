@@ -6,5 +6,5 @@ from . import admins
 
 
 def setup(dp: Dispatcher):
-    for module in (users, admins):
+    for module in (admins, users):
         module.setup(dp)

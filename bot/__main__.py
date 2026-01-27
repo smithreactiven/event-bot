@@ -12,6 +12,7 @@ import database
 
 
 async def main():
+    logging.info("Connecting to DB: %s:%s/%s", config.PSQL_HOSTNAME, config.PSQL_PORT, config.PSQL_DB_NAME)
     db = database.implement.AsyncPostgreSQL(
         database_name=config.PSQL_DB_NAME,
         username=config.PSQL_USERNAME,
@@ -20,14 +21,14 @@ async def main():
         port=5432
     )
 
-    session = await database.manager.create_async_session(db)
+    session = await database.manager.create_async_session(db, create_tables=True)
 
     bot = Bot(token=config.BOT_TOKEN, parse_mode=ParseMode.HTML)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage, session=session)
 
     filters.setup(dp)
-    middlewares.setup(dp)
+    middlewares.setup(dp, session=session, bot=bot)
     handlers.setup(dp)
 
     await commands_setter.set_bot_commands(bot)

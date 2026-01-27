@@ -5,8 +5,12 @@ import typing
 from . import base
 
 
-async def create_async_session(database: base.AsyncDatabase, *args, **kwargs):
-    engine = create_async_engine(str(database), *args, **kwargs)
+async def create_async_session(database: base.AsyncDatabase, *, create_tables=False, **kwargs):
+    engine = create_async_engine(str(database), **kwargs)
+    if create_tables:
+        from bot.models.sql import Base
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
     Session = sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
     return Session
 
