@@ -14,6 +14,18 @@ def _key(event_id: int, round_number: int, user_id: int):
     return (event_id, round_number, user_id)
 
 
+def _format_participant_info(part) -> str:
+    """Форматирует информацию об участнике для показа при написании мнения."""
+    lines = ["👤 <b>{}</b>".format(part.full_name)]
+    if part.instagram:
+        lines.append("📷 {}".format(part.instagram))
+    if part.telegram:
+        lines.append("✈️ @{}".format(part.telegram.lstrip("@")))
+    if part.vk:
+        lines.append("🔵 {}".format(part.vk))
+    return "\n".join(lines)
+
+
 async def opinion_about_cb(callback: types.CallbackQuery, state: FSMContext, session):
     await callback.answer()
     try:
@@ -43,10 +55,17 @@ async def opinion_about_cb(callback: types.CallbackQuery, state: FSMContext, ses
     await state.update_data(about_user_id=about_user_id, event_id=ev.id, round_number=cur.number)
     await state.set_state(states.user_state.OpinionStates.writing)
 
-    if remaining <= 0:
-        t = "Время вышло. Вы можете отправить мнение или нажать Отмена."
+    # Формируем текст с информацией об участнике
+    if part:
+        info = _format_participant_info(part)
     else:
-        t = (await tools.filer.read_txt("opinion_prompt_writing")).format(name=about_name, m=int(remaining))
+        info = "👤 {}".format(about_name)
+    
+    if remaining <= 0:
+        t = "{}\n\n⏱ Время вышло. Вы можете отправить мнение или нажать Отмена.".format(info)
+    else:
+        t = "{}\n\n✍️ Напишите мнение об этом участнике.\n⏱ Осталось {} мин.".format(info, int(remaining))
+    
     kb = event_service.build_cancel_kb()
     try:
         await callback.bot.edit_message_text(chat_id=rm.chat_id, message_id=rm.message_id, text=t, reply_markup=kb)
@@ -55,6 +74,12 @@ async def opinion_about_cb(callback: types.CallbackQuery, state: FSMContext, ses
 
 
 async def opinion_writing_msg(message: types.Message, state: FSMContext, session, bot):
+    # Удаляем сообщение пользователя для чистоты чата
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    
     data = await state.get_data()
     about_user_id = data.get("about_user_id")
     event_id = data.get("event_id")
@@ -83,14 +108,18 @@ async def opinion_writing_msg(message: types.Message, state: FSMContext, session
     if r and r.list_shown_at:
         elapsed = (datetime.utcnow() - r.list_shown_at).total_seconds() / 60
         remaining = max(0, int(10 - elapsed))
-    t = (await tools.filer.read_txt("round_list")).format(m=remaining) if remaining > 0 else await tools.filer.read_txt("round_list_timeout")
+    
+    # Показываем подтверждение + возвращаем список участников
+    saved_txt = await tools.filer.read_txt("opinion_saved")
+    list_txt = (await tools.filer.read_txt("round_list")).format(m=remaining) if remaining > 0 else await tools.filer.read_txt("round_list_timeout")
+    t = "✅ {}\n\n{}".format(saved_txt, list_txt)
+    
     participants = await event_service.get_participants(session, event_id, exclude_user_id=message.from_user.id)
     kb = event_service.build_participants_kb(participants, message.from_user.id)
     try:
         await bot.edit_message_text(chat_id=rm.chat_id, message_id=rm.message_id, text=t, reply_markup=kb)
     except Exception:
-        pass
-    await message.answer(await tools.filer.read_txt("opinion_saved"))
+        await message.answer(saved_txt)
 
 
 async def opinion_cancel_cb(callback: types.CallbackQuery, state: FSMContext, session):

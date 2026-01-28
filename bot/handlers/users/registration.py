@@ -26,7 +26,26 @@ async def _ensure_event_and_open(state: FSMContext, session, user_id: int):
     return event_id, ev, None
 
 
-async def reg_full_name(message: types.Message, state: FSMContext, session):
+async def _delete_prev_messages(message: types.Message, state: FSMContext, bot):
+    """Удалить предыдущее сообщение бота и сообщение пользователя."""
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    # Удаляем предыдущее сообщение бота
+    if prev_id:
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=prev_id)
+        except Exception:
+            pass
+
+
+async def reg_full_name(message: types.Message, state: FSMContext, session, bot):
+    await _delete_prev_messages(message, state, bot)
+    
     event_id, _, err = await _ensure_event_and_open(state, session, message.from_user.id)
     if err:
         await state.clear()
@@ -34,15 +53,20 @@ async def reg_full_name(message: types.Message, state: FSMContext, session):
 
     ok, err = v.validate_full_name(message.text)
     if not ok:
-        return await message.answer(err)
+        sent = await message.answer(err)
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
 
     await state.update_data(full_name=(message.text or "").strip())
     t = await tools.filer.read_txt("registration_instagram")
     await state.set_state(states.user_state.RegistrationStates.instagram)
-    await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+    sent = await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+    await state.update_data(prev_bot_msg_id=sent.message_id)
 
 
-async def reg_instagram_msg(message: types.Message, state: FSMContext, session):
+async def reg_instagram_msg(message: types.Message, state: FSMContext, session, bot):
+    await _delete_prev_messages(message, state, bot)
+    
     event_id, _, err = await _ensure_event_and_open(state, session, message.from_user.id)
     if err:
         await state.clear()
@@ -50,14 +74,20 @@ async def reg_instagram_msg(message: types.Message, state: FSMContext, session):
 
     ok, err, val = v.validate_instagram(message.text)
     if not ok:
-        return await message.answer(err)
+        sent = await message.answer(err)
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
+    
     await state.update_data(instagram=val)
     t = await tools.filer.read_txt("registration_telegram")
     await state.set_state(states.user_state.RegistrationStates.telegram)
-    await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+    sent = await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+    await state.update_data(prev_bot_msg_id=sent.message_id)
 
 
-async def reg_telegram_msg(message: types.Message, state: FSMContext, session):
+async def reg_telegram_msg(message: types.Message, state: FSMContext, session, bot):
+    await _delete_prev_messages(message, state, bot)
+    
     event_id, _, err = await _ensure_event_and_open(state, session, message.from_user.id)
     if err:
         await state.clear()
@@ -65,14 +95,20 @@ async def reg_telegram_msg(message: types.Message, state: FSMContext, session):
 
     ok, err, val = v.validate_telegram(message.text)
     if not ok:
-        return await message.answer(err)
+        sent = await message.answer(err)
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
+    
     await state.update_data(telegram=val)
     t = await tools.filer.read_txt("registration_vk")
     await state.set_state(states.user_state.RegistrationStates.vk)
-    await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+    sent = await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+    await state.update_data(prev_bot_msg_id=sent.message_id)
 
 
-async def reg_vk_msg(message: types.Message, state: FSMContext, session):
+async def reg_vk_msg(message: types.Message, state: FSMContext, session, bot):
+    await _delete_prev_messages(message, state, bot)
+    
     event_id, _, err = await _ensure_event_and_open(state, session, message.from_user.id)
     if err:
         await state.clear()
@@ -80,7 +116,10 @@ async def reg_vk_msg(message: types.Message, state: FSMContext, session):
 
     ok, err, val = v.validate_vk(message.text)
     if not ok:
-        return await message.answer(err)
+        sent = await message.answer(err)
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
+    
     await state.update_data(vk=val)
     await _finish_registration(message, state, session, message.from_user.id)
 
@@ -90,48 +129,80 @@ async def skip_social_cb(callback: types.CallbackQuery, state: FSMContext, sessi
     _, _, err = await _ensure_event_and_open(state, session, callback.from_user.id)
     if err:
         await state.clear()
-        return await callback.message.answer(err)
+        try:
+            await callback.message.edit_text(err)
+        except Exception:
+            await callback.message.answer(err)
+        return
 
     s = await state.get_state()
     if s == states.user_state.RegistrationStates.instagram.state:
         await state.update_data(instagram=None)
         t = await tools.filer.read_txt("registration_telegram")
         await state.set_state(states.user_state.RegistrationStates.telegram)
-        await callback.message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+        try:
+            await callback.message.edit_text(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+        except Exception:
+            sent = await callback.message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+            await state.update_data(prev_bot_msg_id=sent.message_id)
     elif s == states.user_state.RegistrationStates.telegram.state:
         await state.update_data(telegram=None)
         t = await tools.filer.read_txt("registration_vk")
         await state.set_state(states.user_state.RegistrationStates.vk)
-        await callback.message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+        try:
+            await callback.message.edit_text(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+        except Exception:
+            sent = await callback.message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+            await state.update_data(prev_bot_msg_id=sent.message_id)
     elif s == states.user_state.RegistrationStates.vk.state:
         await state.update_data(vk=None)
-        await _finish_registration(callback.message, state, session, callback.from_user.id)
+        await _finish_registration(callback.message, state, session, callback.from_user.id, edit=True)
     else:
         await state.clear()
-        await callback.message.answer("Ошибка. Начните с /start.")
+        try:
+            await callback.message.edit_text("Ошибка. Начните с /start.")
+        except Exception:
+            await callback.message.answer("Ошибка. Начните с /start.")
 
 
-async def _finish_registration(message: types.Message, state: FSMContext, session, user_id: int):
+async def _finish_registration(message: types.Message, state: FSMContext, session, user_id: int, edit: bool = False):
     """
-    Завершение регистрации.
-    user_id передаётся явно, т.к. при callback message.from_user — это бот, а не пользователь.
+    user_id передаётся явно потому что при callback message.from_user это БОТ, а не пользователь.
+    edit=True - редактировать сообщение вместо отправки нового.
     """
     data = await state.get_data()
     event_id = data.get("event_id")
     full_name = data.get("full_name")
     if not event_id or not full_name:
         await state.clear()
+        if edit:
+            try:
+                return await message.edit_text("Ошибка. Начните с /start.")
+            except Exception:
+                pass
         return await message.answer("Ошибка. Начните с /start.")
 
     ev = await event_service.get_event_by_id(session, event_id)
     ok, err = event_service.ensure_registration_open(ev)
     if not ok:
         await state.clear()
-        return await message.answer(err or "Регистрация недоступна.")
+        text = err or "Регистрация недоступна."
+        if edit:
+            try:
+                return await message.edit_text(text)
+            except Exception:
+                pass
+        return await message.answer(text)
 
     if await event_service.get_participant(session, event_id, user_id) is not None:
         await state.clear()
-        return await message.answer("Вы уже зарегистрированы на это мероприятие.")
+        text = "Вы уже зарегистрированы на это мероприятие."
+        if edit:
+            try:
+                return await message.edit_text(text)
+            except Exception:
+                pass
+        return await message.answer(text)
 
     async with session() as open_session:
         p = Participant(
@@ -148,15 +219,25 @@ async def _finish_registration(message: types.Message, state: FSMContext, sessio
         except IntegrityError:
             await open_session.rollback()
             await state.clear()
-            return await message.answer("Вы уже зарегистрированы на это мероприятие.")
+            text = "Вы уже зарегистрированы на это мероприятие."
+            if edit:
+                try:
+                    return await message.edit_text(text)
+                except Exception:
+                    pass
+            return await message.answer(text)
 
     await state.clear()
     t = await tools.filer.read_txt("registration_done")
+    if edit:
+        try:
+            return await message.edit_text(t)
+        except Exception:
+            pass
     await message.answer(t)
 
 
 def _not_command():
-    """Не матчить сообщения-команды (начинающиеся с /), чтобы /admin и /start обрабатывались своими хендлерами."""
     return ~F.text.startswith("/")
 
 

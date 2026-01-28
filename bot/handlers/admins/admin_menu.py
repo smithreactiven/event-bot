@@ -45,12 +45,13 @@ async def admin_menu_handler(message: Message, state: FSMContext, session):
 
 
 async def admin_refresh_cb(callback: types.CallbackQuery, state: FSMContext, session):
-    await callback.answer()
     msg_text = await _admin_panel_text(session)
     try:
         await callback.message.edit_text(text=msg_text, reply_markup=_admin_markup())
+        await callback.answer("Обновлено")
     except Exception:
-        await callback.message.answer(text=msg_text, reply_markup=_admin_markup())
+        # Текст не изменился — просто показываем уведомление
+        await callback.answer("Данные актуальны")
 
 
 def setup(dp: Dispatcher):

@@ -10,11 +10,22 @@ from bot.services import event_service
 _BOT_ID = int(config.BOT_TOKEN.split(":")[0])
 
 
-async def start_handler(message: types.Message, state: FSMContext, session):
+async def start_handler(message: types.Message, state: FSMContext, session, bot):
+    # Удаляем предыдущее сообщение бота если есть
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    if prev_id:
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=prev_id)
+        except Exception:
+            pass
+    
     await state.clear()
+    
     # Защита от регистрации ботов (включая самого себя)
     if message.from_user.is_bot or message.from_user.id == _BOT_ID:
         return await message.answer("Боты не могут регистрироваться.")
+    
     ev = await event_service.get_active_event(session)
     if ev is None:
         latest = await event_service.get_latest_event(session)
