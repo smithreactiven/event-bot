@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from aiogram import types, Dispatcher, F
@@ -26,7 +28,9 @@ async def _admin_panel_text(session) -> str:
     )
     if cur:
         if cur.list_shown_at:
-            msg_text += "\nФаза: сбор мнений."
+            elapsed = (datetime.utcnow() - cur.list_shown_at).total_seconds() / 60
+            remaining = max(0, int(10 - elapsed))
+            msg_text += "\nФаза: сбор мнений. ⏱ Осталось {} мин.".format(remaining)
         else:
             msg_text += "\nФаза: общение."
             rows = await event_service.get_round_messages(session, ev.id, cur.number)

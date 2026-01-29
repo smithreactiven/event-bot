@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+import asyncio
 
 from aiogram import types, Dispatcher, F
 from aiogram.fsm.context import FSMContext
@@ -13,9 +14,47 @@ from bot import keyboards, config, states
 from bot.models.sql import Event, Round, Participant, Opinion
 from bot.services import event_service
 
+# Хранение задачи автообновления админки
+_admin_timer_task = None
+_admin_timer_msg = None  # (chat_id, message_id)
+
 
 def _admin_menu_markup():
     return keyboards.inline.admin.admin_menu.keyboard.as_markup()
+
+
+def cancel_admin_timer():
+    """Отменить автообновление админского таймера."""
+    global _admin_timer_task
+    if _admin_timer_task and not _admin_timer_task.done():
+        _admin_timer_task.cancel()
+    _admin_timer_task = None
+
+
+async def _admin_timer_countdown(bot, session_factory, event_id: int, round_number: int, chat_id: int, message_id: int):
+    """Автообновление сообщения админа каждую минуту."""
+    global _admin_timer_task, _admin_timer_msg
+    from bot.handlers.admins.admin_menu import _admin_panel_text
+    
+    for m in range(9, -1, -1):  # 9, 8, 7... 0
+        await asyncio.sleep(60)
+        # Проверяем что раунд всё ещё активен
+        ev = await event_service.get_active_event(session_factory)
+        if ev is None or ev.id != event_id:
+            break
+        cur = await event_service.get_current_round(session_factory, event_id)
+        if cur is None or cur.number != round_number or cur.list_shown_at is None:
+            break
+        
+        # Обновляем сообщение
+        msg_text = await _admin_panel_text(session_factory)
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg_text, reply_markup=_admin_menu_markup())
+        except Exception:
+            pass
+    
+    _admin_timer_task = None
+    _admin_timer_msg = None
 
 
 async def _safe_edit(callback: types.CallbackQuery, text: str, reply_markup=None):
@@ -122,6 +161,8 @@ async def start_round_cb(callback: types.CallbackQuery, state: FSMContext, sessi
 
 async def next_round_cb(callback: types.CallbackQuery, state: FSMContext, session):
     await callback.answer()
+    cancel_admin_timer()  # Останавливаем автообновление
+    
     ev = await event_service.get_active_event(session)
     if ev is None:
         return await _safe_edit(callback, "Сначала начните мероприятие.", _admin_menu_markup())
@@ -185,6 +226,8 @@ async def round_name_msg(message: Message, state: FSMContext, session, bot):
 
 
 async def end_round_cb(callback: types.CallbackQuery, state: FSMContext, session):
+    global _admin_timer_task, _admin_timer_msg
+    
     await callback.answer()
     ev = await event_service.get_active_event(session)
     if ev is None:
@@ -209,15 +252,24 @@ async def end_round_cb(callback: types.CallbackQuery, state: FSMContext, session
         await open_session.commit()
 
     await event_service.finish_round_show_list(callback.bot, session, ev.id, cur.number, tools.filer.read_txt)
-    await _safe_edit(
-        callback,
-        "Раунд: фаза сбора мнений (10 мин). Участников: {}.".format(len(rows)),
-        _admin_menu_markup()
+    
+    # Показываем админу статус с таймером
+    from bot.handlers.admins.admin_menu import _admin_panel_text
+    msg_text = await _admin_panel_text(session)
+    await _safe_edit(callback, msg_text, _admin_menu_markup())
+    
+    # Запускаем автообновление таймера для админа
+    cancel_admin_timer()
+    _admin_timer_msg = (callback.message.chat.id, callback.message.message_id)
+    _admin_timer_task = asyncio.create_task(
+        _admin_timer_countdown(callback.bot, session, ev.id, cur.number, callback.message.chat.id, callback.message.message_id)
     )
 
 
 async def end_event_cb(callback: types.CallbackQuery, state: FSMContext, session):
     await callback.answer()
+    cancel_admin_timer()  # Останавливаем автообновление
+    
     ev = await event_service.get_active_event(session)
     if ev is None:
         return await _safe_edit(callback, "Нет активного мероприятия.", _admin_menu_markup())
@@ -232,7 +284,20 @@ async def end_event_cb(callback: types.CallbackQuery, state: FSMContext, session
             r.ended_at = datetime.utcnow()
         await open_session.commit()
 
-    await _safe_edit(callback, "Мероприятие завершено.", _admin_menu_markup())
+    # Уведомляем всех участников о завершении
+    participants = await event_service.get_participants(session, ev.id)
+    notify_text = """Мероприятие завершено, спасибо за участие! Скоро здесь появятся мнения других участников о Вас, ожидайте!
+
+А пока подпишитесь на наш телеграм-канал, чтобы прийти на другие форматы для знакомств (френдинги, детективно-ролевые игры): https://t.me/+Bjifa2n2IAs0OThi"""
+    notified = 0
+    for p in participants:
+        try:
+            await callback.bot.send_message(chat_id=p.user_id, text=notify_text)
+            notified += 1
+        except Exception as e:
+            logging.exception("end_event notify %s: %s", p.user_id, e)
+
+    await _safe_edit(callback, "Мероприятие завершено. Уведомлено участников: {}/{}.".format(notified, len(participants)), _admin_menu_markup())
 
 
 # ---- Список участников ----
@@ -274,12 +339,8 @@ async def admin_participant_cb(callback: types.CallbackQuery, state: FSMContext,
         "",
         "🆔 Telegram ID: <code>{}</code>".format(part.user_id),
     ]
-    if part.instagram:
-        lines.append("📷 Instagram: {}".format(part.instagram))
     if part.telegram:
         lines.append("✈️ Telegram: @{}".format(part.telegram.lstrip("@")))
-    if part.vk:
-        lines.append("🔵 VK: {}".format(part.vk))
 
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="◀️ К списку", callback_data="list_participants"))
@@ -317,9 +378,16 @@ async def look_opinions_user_cb(callback: types.CallbackQuery, state: FSMContext
     part = await event_service.get_participant(session, ev.id, uid)
     name = part.full_name if part else str(uid)
     opinions = await event_service.get_opinions_about(session, ev.id, uid)
+    
+    # Получаем всех участников для определения авторов
+    all_participants = await event_service.get_participants(session, ev.id)
+    participants_map = {p.user_id: p for p in all_participants}
+    
     by_round = {}
     for o in opinions:
-        by_round.setdefault(o.round_number, []).append(o.text)
+        author = participants_map.get(o.from_user_id)
+        author_name = author.full_name if author else "ID:{}".format(o.from_user_id)
+        by_round.setdefault(o.round_number, []).append((o.text, author_name))
     
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="◀️ Назад", callback_data="look_opinions"))
@@ -327,11 +395,11 @@ async def look_opinions_user_cb(callback: types.CallbackQuery, state: FSMContext
     if not by_round:
         return await _safe_edit(callback, "У участника {} нет мнений.".format(name), kb.as_markup())
     
-    lines = ["Участник: {}".format(name)]
+    lines = ["Мнения об участнике: <b>{}</b>".format(name)]
     for r in sorted(by_round.keys()):
-        lines.append("\nРаунд {}:".format(r))
-        for t in by_round[r]:
-            lines.append("— {}".format(t))
+        lines.append("\n<b>Раунд {}:</b>".format(r))
+        for text, author_name in by_round[r]:
+            lines.append("— {} <i>(от: {})</i>".format(text, author_name))
     await _safe_edit(callback, "\n".join(lines), kb.as_markup())
 
 

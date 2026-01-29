@@ -92,6 +92,33 @@ async def get_opinions_about(session_factory, event_id: int, about_user_id: int)
         return list(r.scalars().all())
 
 
+async def get_written_opinion_targets(session_factory, event_id: int, round_number: int, from_user_id: int) -> typing.Set[int]:
+    """Получить set user_id тех, о ком пользователь уже написал мнение в этом раунде."""
+    async with session_factory() as s:
+        r = await s.execute(
+            select(Opinion.about_user_id).where(
+                Opinion.event_id == event_id,
+                Opinion.round_number == round_number,
+                Opinion.from_user_id == from_user_id
+            )
+        )
+        return set(r.scalars().all())
+
+
+async def has_opinion_about(session_factory, event_id: int, round_number: int, from_user_id: int, about_user_id: int) -> bool:
+    """Проверить, написал ли пользователь мнение о другом участнике в этом раунде."""
+    async with session_factory() as s:
+        r = await s.execute(
+            select(Opinion.id).where(
+                Opinion.event_id == event_id,
+                Opinion.round_number == round_number,
+                Opinion.from_user_id == from_user_id,
+                Opinion.about_user_id == about_user_id
+            ).limit(1)
+        )
+        return r.scalars().first() is not None
+
+
 async def get_rounds_with_opinions_for(session_factory, event_id: int, about_user_id: int) -> typing.List[int]:
     async with session_factory() as s:
         r = await s.execute(
@@ -102,12 +129,19 @@ async def get_rounds_with_opinions_for(session_factory, event_id: int, about_use
         return list(r.scalars().all())
 
 
-def build_participants_kb(participants: typing.List[Participant], exclude_user_id: int):
+def build_participants_kb(participants: typing.List[Participant], exclude_user_id: int, already_written: typing.Optional[typing.Set[int]] = None):
+    """
+    Построить клавиатуру со списком участников.
+    already_written - set user_id тех, о ком уже написано мнение (они исключаются из списка).
+    """
     from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
     builder = InlineKeyboardBuilder()
+    already_written = already_written or set()
     for p in participants:
         if p.user_id == exclude_user_id:
             continue
+        if p.user_id in already_written:
+            continue  # Уже написали мнение об этом участнике
         builder.row(InlineKeyboardButton(text=p.full_name, callback_data=f"opinion_about_{p.user_id}"))
     builder.row(InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_timer"))
     builder.row(InlineKeyboardButton(text="✅ Я закончил(а)!", callback_data="done_round"))
@@ -135,8 +169,22 @@ async def get_round_message(session_factory, event_id: int, round_number: int, u
         return r.scalars().first()
 
 
+async def delete_previous_round_messages(bot, session_factory, event_id: int, prev_round_number: int):
+    """Удалить сообщения предыдущего раунда у всех участников."""
+    rows = await get_round_messages(session_factory, event_id, prev_round_number)
+    for rm in rows:
+        try:
+            await bot.delete_message(chat_id=rm.chat_id, message_id=rm.message_id)
+        except Exception:
+            pass
+
+
 async def notify_round_start(bot, session_factory, event_id: int, round_number: int, round_name: str, read_txt) -> int:
     """Разослать участникам анонс раунда БЕЗ кнопок (фаза общения). Кнопки появятся после завершения раунда."""
+    # Удаляем сообщения предыдущего раунда если есть
+    if round_number > 1:
+        await delete_previous_round_messages(bot, session_factory, event_id, round_number - 1)
+    
     text_tpl = await read_txt("round_announce")
     text_tpl = text_tpl.format(n=round_number, round_name=round_name)
     ok = 0
@@ -175,7 +223,8 @@ async def _countdown_task(bot, session_factory, event_id: int, round_number: int
             return
         view = _round_view.get(key, "list")
         participants = await get_participants(session_factory, event_id, exclude_user_id=user_id)
-        kb = build_participants_kb(participants, user_id)
+        already_written = await get_written_opinion_targets(session_factory, event_id, round_number, user_id)
+        kb = build_participants_kb(participants, user_id, already_written)
         if m == 0:
             t = await read_txt("round_list_timeout")
             _round_view[key] = "list"
@@ -205,7 +254,8 @@ async def finish_round_show_list(bot, session_factory, event_id: int, round_numb
     for rm in rows:
         _round_view[(event_id, round_number, rm.user_id)] = "list"
         participants = await get_participants(session_factory, event_id, exclude_user_id=rm.user_id)
-        kb = build_participants_kb(participants, rm.user_id)
+        already_written = await get_written_opinion_targets(session_factory, event_id, round_number, rm.user_id)
+        kb = build_participants_kb(participants, rm.user_id, already_written)
         try:
             await bot.edit_message_text(chat_id=rm.chat_id, message_id=rm.message_id, text=t, reply_markup=kb)
         except Exception as e:

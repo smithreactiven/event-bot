@@ -58,30 +58,10 @@ async def reg_full_name(message: types.Message, state: FSMContext, session, bot)
         return
 
     await state.update_data(full_name=(message.text or "").strip())
-    t = await tools.filer.read_txt("registration_instagram")
-    await state.set_state(states.user_state.RegistrationStates.instagram)
-    sent = await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
-    await state.update_data(prev_bot_msg_id=sent.message_id)
-
-
-async def reg_instagram_msg(message: types.Message, state: FSMContext, session, bot):
-    await _delete_prev_messages(message, state, bot)
-    
-    event_id, _, err = await _ensure_event_and_open(state, session, message.from_user.id)
-    if err:
-        await state.clear()
-        return await message.answer(err)
-
-    ok, err, val = v.validate_instagram(message.text)
-    if not ok:
-        sent = await message.answer(err)
-        await state.update_data(prev_bot_msg_id=sent.message_id)
-        return
-    
-    await state.update_data(instagram=val)
     t = await tools.filer.read_txt("registration_telegram")
     await state.set_state(states.user_state.RegistrationStates.telegram)
-    sent = await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
+    # Без кнопки "Пропустить" - Telegram ник обязателен
+    sent = await message.answer(t)
     await state.update_data(prev_bot_msg_id=sent.message_id)
 
 
@@ -100,69 +80,7 @@ async def reg_telegram_msg(message: types.Message, state: FSMContext, session, b
         return
     
     await state.update_data(telegram=val)
-    t = await tools.filer.read_txt("registration_vk")
-    await state.set_state(states.user_state.RegistrationStates.vk)
-    sent = await message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
-    await state.update_data(prev_bot_msg_id=sent.message_id)
-
-
-async def reg_vk_msg(message: types.Message, state: FSMContext, session, bot):
-    await _delete_prev_messages(message, state, bot)
-    
-    event_id, _, err = await _ensure_event_and_open(state, session, message.from_user.id)
-    if err:
-        await state.clear()
-        return await message.answer(err)
-
-    ok, err, val = v.validate_vk(message.text)
-    if not ok:
-        sent = await message.answer(err)
-        await state.update_data(prev_bot_msg_id=sent.message_id)
-        return
-    
-    await state.update_data(vk=val)
     await _finish_registration(message, state, session, message.from_user.id)
-
-
-async def skip_social_cb(callback: types.CallbackQuery, state: FSMContext, session):
-    await callback.answer()
-    _, _, err = await _ensure_event_and_open(state, session, callback.from_user.id)
-    if err:
-        await state.clear()
-        try:
-            await callback.message.edit_text(err)
-        except Exception:
-            await callback.message.answer(err)
-        return
-
-    s = await state.get_state()
-    if s == states.user_state.RegistrationStates.instagram.state:
-        await state.update_data(instagram=None)
-        t = await tools.filer.read_txt("registration_telegram")
-        await state.set_state(states.user_state.RegistrationStates.telegram)
-        try:
-            await callback.message.edit_text(t, reply_markup=keyboards.inline.registration.skip_keyboard())
-        except Exception:
-            sent = await callback.message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
-            await state.update_data(prev_bot_msg_id=sent.message_id)
-    elif s == states.user_state.RegistrationStates.telegram.state:
-        await state.update_data(telegram=None)
-        t = await tools.filer.read_txt("registration_vk")
-        await state.set_state(states.user_state.RegistrationStates.vk)
-        try:
-            await callback.message.edit_text(t, reply_markup=keyboards.inline.registration.skip_keyboard())
-        except Exception:
-            sent = await callback.message.answer(t, reply_markup=keyboards.inline.registration.skip_keyboard())
-            await state.update_data(prev_bot_msg_id=sent.message_id)
-    elif s == states.user_state.RegistrationStates.vk.state:
-        await state.update_data(vk=None)
-        await _finish_registration(callback.message, state, session, callback.from_user.id, edit=True)
-    else:
-        await state.clear()
-        try:
-            await callback.message.edit_text("Ошибка. Начните с /start.")
-        except Exception:
-            await callback.message.answer("Ошибка. Начните с /start.")
 
 
 async def _finish_registration(message: types.Message, state: FSMContext, session, user_id: int, edit: bool = False):
@@ -209,9 +127,7 @@ async def _finish_registration(message: types.Message, state: FSMContext, sessio
             event_id=event_id,
             user_id=user_id,
             full_name=full_name,
-            instagram=data.get("instagram"),
             telegram=data.get("telegram"),
-            vk=data.get("vk"),
         )
         open_session.add(p)
         try:
@@ -244,7 +160,4 @@ def _not_command():
 def setup(dp: Dispatcher):
     no_cmd = _not_command()
     dp.message.register(reg_full_name, StateFilter(states.user_state.RegistrationStates.full_name), no_cmd)
-    dp.message.register(reg_instagram_msg, StateFilter(states.user_state.RegistrationStates.instagram), no_cmd)
     dp.message.register(reg_telegram_msg, StateFilter(states.user_state.RegistrationStates.telegram), no_cmd)
-    dp.message.register(reg_vk_msg, StateFilter(states.user_state.RegistrationStates.vk), no_cmd)
-    dp.callback_query.register(skip_social_cb, F.data == "skip_social")

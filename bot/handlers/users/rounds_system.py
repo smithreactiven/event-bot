@@ -17,12 +17,8 @@ def _key(event_id: int, round_number: int, user_id: int):
 def _format_participant_info(part) -> str:
     """Форматирует информацию об участнике для показа при написании мнения."""
     lines = ["👤 <b>{}</b>".format(part.full_name)]
-    if part.instagram:
-        lines.append("📷 {}".format(part.instagram))
     if part.telegram:
         lines.append("✈️ @{}".format(part.telegram.lstrip("@")))
-    if part.vk:
-        lines.append("🔵 {}".format(part.vk))
     return "\n".join(lines)
 
 
@@ -41,6 +37,11 @@ async def opinion_about_cb(callback: types.CallbackQuery, state: FSMContext, ses
         return await callback.message.answer("Раунд завершён.")
     if cur.list_shown_at is None:
         return await callback.message.answer("Сбор мнений ещё не начат.")
+
+    # Проверка: не написано ли уже мнение об этом участнике
+    if await event_service.has_opinion_about(session, ev.id, cur.number, callback.from_user.id, about_user_id):
+        await callback.answer("Вы уже оставили мнение об этом участнике", show_alert=True)
+        return
 
     rm = await event_service.get_round_message(session, ev.id, cur.number, callback.from_user.id)
     if rm is None:
@@ -109,13 +110,14 @@ async def opinion_writing_msg(message: types.Message, state: FSMContext, session
         elapsed = (datetime.utcnow() - r.list_shown_at).total_seconds() / 60
         remaining = max(0, int(10 - elapsed))
     
-    # Показываем подтверждение + возвращаем список участников
+    # Показываем подтверждение + возвращаем список участников (без тех, о ком уже написали)
     saved_txt = await tools.filer.read_txt("opinion_saved")
     list_txt = (await tools.filer.read_txt("round_list")).format(m=remaining) if remaining > 0 else await tools.filer.read_txt("round_list_timeout")
     t = "✅ {}\n\n{}".format(saved_txt, list_txt)
     
     participants = await event_service.get_participants(session, event_id, exclude_user_id=message.from_user.id)
-    kb = event_service.build_participants_kb(participants, message.from_user.id)
+    already_written = await event_service.get_written_opinion_targets(session, event_id, round_number, message.from_user.id)
+    kb = event_service.build_participants_kb(participants, message.from_user.id, already_written)
     try:
         await bot.edit_message_text(chat_id=rm.chat_id, message_id=rm.message_id, text=t, reply_markup=kb)
     except Exception:
@@ -142,7 +144,8 @@ async def opinion_cancel_cb(callback: types.CallbackQuery, state: FSMContext, se
         remaining = max(0, int(10 - elapsed))
     t = (await tools.filer.read_txt("round_list")).format(m=remaining) if remaining > 0 else await tools.filer.read_txt("round_list_timeout")
     participants = await event_service.get_participants(session, ev.id, exclude_user_id=callback.from_user.id)
-    kb = event_service.build_participants_kb(participants, callback.from_user.id)
+    already_written = await event_service.get_written_opinion_targets(session, ev.id, cur.number, callback.from_user.id)
+    kb = event_service.build_participants_kb(participants, callback.from_user.id, already_written)
     try:
         await callback.bot.edit_message_text(chat_id=rm.chat_id, message_id=rm.message_id, text=t, reply_markup=kb)
     except Exception:
@@ -169,7 +172,8 @@ async def refresh_timer_cb(callback: types.CallbackQuery, state: FSMContext, ses
     else:
         t = await tools.filer.read_txt("round_list_timeout")
     participants = await event_service.get_participants(session, ev.id, exclude_user_id=callback.from_user.id)
-    kb = event_service.build_participants_kb(participants, callback.from_user.id)
+    already_written = await event_service.get_written_opinion_targets(session, ev.id, cur.number, callback.from_user.id)
+    kb = event_service.build_participants_kb(participants, callback.from_user.id, already_written)
     try:
         await callback.bot.edit_message_text(chat_id=rm.chat_id, message_id=rm.message_id, text=t, reply_markup=kb)
     except Exception:
