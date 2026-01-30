@@ -1,3 +1,6 @@
+from datetime import datetime
+import asyncio
+
 from aiogram import types, Dispatcher, F
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
@@ -5,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 import tools
 from bot import keyboards, states
-from bot.models.sql import Participant
+from bot.models.sql import Participant, RoundMessage
 from bot.services import event_service
 from bot.services import registration_validators as v
 
@@ -80,10 +83,10 @@ async def reg_telegram_msg(message: types.Message, state: FSMContext, session, b
         return
     
     await state.update_data(telegram=val)
-    await _finish_registration(message, state, session, message.from_user.id)
+    await _finish_registration(message, state, session, message.from_user.id, bot)
 
 
-async def _finish_registration(message: types.Message, state: FSMContext, session, user_id: int, edit: bool = False):
+async def _finish_registration(message: types.Message, state: FSMContext, session, user_id: int, bot=None, edit: bool = False):
     """
     user_id передаётся явно потому что при callback message.from_user это БОТ, а не пользователь.
     edit=True - редактировать сообщение вместо отправки нового.
@@ -144,6 +147,65 @@ async def _finish_registration(message: types.Message, state: FSMContext, sessio
             return await message.answer(text)
 
     await state.clear()
+    
+    # Проверяем есть ли активный раунд - подключаем опоздавших
+    cur = await event_service.get_current_round(session, event_id)
+    if cur is not None and bot is not None:
+        # Есть активный раунд - подключаем участника
+        if cur.list_shown_at is None:
+            # Фаза общения - отправляем round_announce
+            text_tpl = await tools.filer.read_txt("round_announce")
+            text_tpl = text_tpl.format(n=cur.number, round_name=cur.name or "Раунд")
+            try:
+                msg = await bot.send_message(chat_id=user_id, text=text_tpl)
+                # Сохраняем RoundMessage для этого участника
+                async with session() as open_session:
+                    rm = RoundMessage(
+                        event_id=event_id, round_number=cur.number,
+                        user_id=user_id, chat_id=user_id, message_id=msg.message_id,
+                    )
+                    open_session.add(rm)
+                    await open_session.commit()
+            except Exception:
+                pass
+        else:
+            # Фаза сбора мнений - отправляем список участников
+            elapsed = (datetime.utcnow() - cur.list_shown_at).total_seconds() / 60
+            remaining = max(0, int(10 - elapsed))
+            
+            if remaining > 0:
+                t = (await tools.filer.read_txt("round_list")).format(m=remaining)
+            else:
+                t = await tools.filer.read_txt("round_list_timeout")
+            
+            participants = await event_service.get_participants(session, event_id, exclude_user_id=user_id)
+            already_written = await event_service.get_written_opinion_targets(session, event_id, cur.number, user_id)
+            kb = event_service.build_participants_kb(participants, user_id, already_written)
+            
+            try:
+                msg = await bot.send_message(chat_id=user_id, text=t, reply_markup=kb)
+                # Сохраняем RoundMessage
+                async with session() as open_session:
+                    rm = RoundMessage(
+                        event_id=event_id, round_number=cur.number,
+                        user_id=user_id, chat_id=user_id, message_id=msg.message_id,
+                    )
+                    open_session.add(rm)
+                    await open_session.commit()
+                
+                # Запускаем countdown task для этого участника
+                if remaining > 0:
+                    key = (event_id, cur.number, user_id)
+                    event_service._round_view[key] = "list"
+                    task = asyncio.create_task(
+                        event_service._countdown_task(bot, session, event_id, cur.number, user_id, user_id, msg.message_id, tools.filer.read_txt)
+                    )
+                    event_service._countdown_tasks[key] = task
+            except Exception:
+                pass
+        return  # Не показываем стандартное сообщение registration_done
+    
+    # Нет активного раунда - стандартное сообщение
     t = await tools.filer.read_txt("registration_done")
     if edit:
         try:
